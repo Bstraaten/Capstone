@@ -12,13 +12,6 @@ All scipts
 - App
 - Slidedeck
 
-Data
-- KN_2gram probabilities
-- KN_3gram probabilities
-- KN_4gram probabilities
-- Test_4grams
-- Test_results
-
 
 
 
