@@ -1,0 +1,253 @@
+---
+title: "Milestone Report - Capstone"
+author: "BvS"
+date: "August 15, 2018"
+output: html_document
+---
+
+## Introduction
+This is the milestone report of Coursera's Data Science Specialization Capstone project. News, blog and Twitter data will be analyzed using natural language processing (NLP) techniques, resulting in a prediction model to suggest words based on user input.
+
+This report will contain an exploratory analysis of the data.
+
+```{r setup, message = FALSE, warning = FALSE}
+# load packages
+library(quanteda)
+library(readr)
+library(ggplot2)
+library(knitr)
+```
+
+## Loading the data 
+I have downloaded the files, manually examined the zip file and zipped the English files into my R working directory. Then loaded the files into R using the following code.
+
+```{r load, message = FALSE, error = FALSE, warning = FALSE, cache = TRUE}
+blogs <- read_delim("texts/en_US.blogs.txt",
+                    "\t", escape_double = FALSE, col_names = FALSE,
+                    trim_ws = TRUE)
+
+news <- read_delim("texts/en_US.news.txt",
+                   "\t", escape_double = FALSE, col_names = FALSE,
+                   trim_ws = TRUE)
+
+twitter <- read_delim("texts/en_US.twitter.txt",
+                      "\t", escape_double = FALSE, col_names = FALSE,
+                      trim_ws = TRUE)
+```
+
+First, I want to do some pre-processing to avoid some problems down the line by removing special characters and blank rows. Then, we will use Quanteda to create a corpus for every text.
+
+```{r preprocessing, cache = TRUE}
+# remove special caracters, see reference 1
+blogs$X1 <- iconv(blogs$X1, 'UTF-8', 'ASCII')
+news$X1 <- iconv(news$X1, 'UTF-8', 'ASCII')
+twitter$X1 <- iconv(twitter$X1, 'UTF-8', 'ASCII')
+
+# remove blank rows
+blogs <- blogs[which(is.na(blogs$X1) == FALSE), ]
+news <- news[which(is.na(news$X1) == FALSE), ]
+twitter <- twitter[which(is.na(twitter$X1) == FALSE), ]
+
+## create corpus with quanteda, see reference 2
+corpus_blogs <- corpus(blogs, text_field = "X1")
+corpus_news <- corpus(news, text_field = "X1")
+corpus_twitter <- corpus(twitter, text_field = "X1")
+
+## remove original files to clean up space
+remove(blogs); remove(news); remove(twitter)
+```
+
+## Main characteristics
+Now that I have loaded the files I will summarize some main characteristics and store them in a table.
+
+```{r summarize1, cache = TRUE}
+## add source information
+docvars(corpus_blogs, "source") <- "blogs"
+docvars(corpus_news, "source") <- "news"
+docvars(corpus_twitter, "source") <- "twitter"
+
+## save summary statistics
+sum_stat <- as.data.frame(c("blogs", "news", "twitter"))
+
+sum_stat$lines[1] <- ndoc(corpus_blogs)
+sum_stat$lines[2] <- ndoc(corpus_news)
+sum_stat$lines[3] <- ndoc(corpus_twitter)
+
+sum_stat$words[1] <- sum(ntoken(corpus_blogs))
+sum_stat$words[2] <- sum(ntoken(corpus_news))
+sum_stat$words[3] <- sum(ntoken(corpus_twitter))
+```
+
+Since we don't need all the data to train a model properly, I will draw a sample of 1% of the blog and news file, and 0.5% of the twitter file so we end up with more or less the same number of lines per file.
+
+```{r sample, cache = TRUE}
+set.seed(2018)
+
+corpus_blogs <- corpus_sample(corpus_blogs, size = ndoc(corpus_blogs) * .01, replace = FALSE)
+corpus_news <- corpus_sample(corpus_news, size = ndoc(corpus_news) * .01, replace = FALSE)
+corpus_twitter <- corpus_sample(corpus_twitter, size = ndoc(corpus_twitter) * .005, replace = FALSE)
+
+corpus_all <- corpus_blogs+corpus_news+corpus_twitter
+```
+
+Now that have made the samples, let's see how they compare to the original texts.
+
+```{r summarize2, cache = TRUE}
+## add sample to summary statistics
+sum_stat$sample_lines[1] <- ndoc(corpus_blogs)
+sum_stat$sample_lines[2] <- ndoc(corpus_news)
+sum_stat$sample_lines[3] <- ndoc(corpus_twitter)
+
+words_blogs <- ntoken(corpus_blogs)
+words_news <- ntoken(corpus_news)
+words_twitter <- ntoken(corpus_twitter)
+
+sum_stat$sample_words[1] <- sum(words_blogs)
+sum_stat$sample_words[2] <- sum(words_news)
+sum_stat$sample_words[3] <- sum(words_twitter)
+
+colnames(sum_stat)[1] <- 'source'
+
+kable(sum_stat, caption = "Table 1, characteristics of texts and samples")
+```
+
+## Explorative analysis
+Now we have our sample let's take a better look at the length of the texts by making a histogram of line length.
+
+```{r histo}
+## plot histograms of line lenght
+histo  <- ggplot() +
+                  geom_histogram(data = as.data.frame(words_twitter), 
+                                 aes(words_twitter, fill = "twitter"), binwidth = 5, alpha = .5) +
+                  geom_histogram(data = as.data.frame(words_news), 
+                                 aes(words_news, fill = "news" ), alpha = .5) +
+                  geom_histogram(data = as.data.frame(words_blogs), 
+                                 aes(words_blogs, fill = "blogs"), alpha = .5) +
+                  scale_fill_manual(name = "source", 
+                                  values = c("twitter" = "red", "news" = "blue", "blogs" = "green")) +
+                  ggtitle("Histogram of word count per document") +
+                  xlim(0, 200) +
+                  xlab("words")
+                  
+histo
+```
+
+The histogram shows us how different news, blog and Twitter text are. Twitter texts are all short. Some blogs are as well but some are long. News texts seem to have a more fixed length and tend to be more 'medium sized'.
+
+## N-grams
+
+Now, we will use Quanteda's dfm command to create a document feauture matrix. The idea behind Quanteda's approach is to leave the original text (corpus) intact, and to apply processing like removing punctuation or bad words at the tokenization step. See reference 3 to  5.
+
+To remove bad words I have downloaded Google's bad word list, see reference 5.
+
+I write a function that creates a document feature matrix for a given n-gram so it saves us the time of doing this for multiple n-grams and next analysis steps.
+
+```{r process}
+profanity <- read_csv("Profanity/full-list-of-bad-words-banned-by-google.csv", 
+                      col_names = FALSE)
+
+## create dfm n-grams function
+Dfm_ngram <- function(x) {
+
+dfm_xgram <- dfm(corpus_all,
+                 ngrams = x,
+                 tolower = TRUE, # transforms capital to lower case
+                 remove_punct = TRUE, # remove all characters in the Unicode "Punctuation" [P] class
+                 remove_numbers = TRUE, # remove tokens that consist only of numbers
+                 remove_separators = TRUE, # remove separators and separator characters
+                 remove_twitter = TRUE, # remove Twitter characters @ and # 
+                 remove_symbols = TRUE, # remove all characters in the Unicode "Symbol" [S] class
+                 remove_url = TRUE, # removes URLs beginning with http(s)
+                 remove = c(stopwords("english"), profanity)) # removes prefefined stopwords and bad words in our profanity file
+
+return(dfm_xgram)
+
+}
+
+Dfm_ngram(1)
+```
+
+Now, we created the document-feauture matrix let's plot the top 20 1-, 2- and 3-grams.
+
+```{r ngrams}
+Plot_ngram <- function(x, y) {
+
+top_ngram <- head(textstat_frequency(Dfm_ngram(x)), y)
+
+plot_ngram <- ggplot(top_ngram, aes(reorder(feature, frequency), frequency)) + 
+                geom_bar(stat = "identity") + 
+                ggtitle(paste("Top",y ,x,"-grams")) +
+                xlab("features") +
+                ylab("count") +
+                coord_flip()
+
+return(plot_ngram)
+
+}
+
+
+Plot_ngram(1, 20)
+Plot_ngram(2, 20)
+Plot_ngram(3, 20)
+```
+
+## Coverage
+
+Coverage is the number of n-grams we need to cover a given part of the word instances in the dictionary. Let's look at how many n-grams we need to  cover 50, 75 and 90% of the n-grams instances.
+
+```{r coverage}
+# create plot function
+plot_coverage <- function(x) {
+
+features_ngram <- textstat_frequency(Dfm_ngram(x))
+features_ngram$coverage <- cumsum(features_ngram$frequency) / sum(features_ngram$frequency)
+
+df_points <- as.data.frame(c(.5, .75, .9))
+df_points$x[1] <- which(abs(features_ngram$coverage - .5) == min(abs(features_ngram$coverage - .5)))
+df_points$x[2] <- which(abs(features_ngram$coverage - .75) == min(abs(features_ngram$coverage - .75)))
+df_points$x[3] <- which(abs(features_ngram$coverage - .9) == min(abs(features_ngram$coverage - .9)))
+
+plot_coverage <- ggplot() +
+                        geom_line(data = features_ngram, aes(rank, coverage)) +
+                        geom_point(data = df_points, aes(x, `c(0.5, 0.75, 0.9)`)) +
+                        geom_text(data = df_points, aes(x, `c(0.5, 0.75, 0.9)`, label = df_points$x, hjust = -.5, vjust = 1)) +
+                        ggtitle(paste("Coverage",x,"-grams")) +
+                        ylab("coverage") +
+                        xlab("number of features")
+                        
+return(plot_coverage)
+
+}
+
+plot_coverage(1)
+plot_coverage(2)
+plot_coverage(3)
+```
+
+The above plots show us the exact point on which we cover 50, 75 and 90% of the n-grams instances in the dictionary. What strikes me is how few 1-gram's we need to cover a big part of all 1-gram instances. And, how soon the curve in the 2-gram and 3-gram coverage plots is a straight 45 degree line, indicating that for every extra n-gram instance we want to cover we need to include a new n-gram: they are more unique then 1-grams.
+
+## Next steps
+Here is a short recap: I loaded the text files and drawed samples since we don't need all the data. I cleaned, tokenized and extracted n-grams with the awesome quanteda package.
+
+Now we have our n-grams and their occurences we can create a function that looks at the n-gram, and suggests the next word based on the previous 1, 2, or 3 words (so we need 4-grams as well). 
+
+The more words are given to the function, the more accurate it's prediction (see the coverage plots), so it makes sense to start with the 4-grams, and then move down to 3- and 2-grams (if enough words are given to the function, otherwise it would start at a lower n-gram). If an unknown word is given to the function it could suggest a word based on partial matches and/or occurences of 1-grams.
+
+Roughly speaking, this function would split up the relevant n-gram, asign a probability to the follow-up words, and choose the word with highest probability. Idealy, the function would learn from prior choices of the user. So far I don't know how to get that done. But than again, I still need to figure out a lot and the strategy above will most likely have some big holes.
+
+## References
+
+1 https://tutorials.quanteda.io/introduction/r-commands/
+2 https://www.rdocumentation.org/packages/base/versions/3.5.1/topics/iconv
+3 https://www.rdocumentation.org/packages/quanteda/versions/0.9.6-9/topics/dfm
+4 https://www.rdocumentation.org/packages/quanteda/versions/0.99.12/topics/tokenize
+5 https://docs.quanteda.io/reference/tokens.html
+6 https://www.freewebheaders.com/wordpress/wp-content/uploads/full-list-of-bad-words_csv-file_2018_07_30.zip
+7 https://stat.ethz.ch/pipermail/r-help/2008-July/167216.html
+8 https://www.r-bloggers.com/generate-text-using-markov-chains-sort-of/
+
+
+
+
+
+
